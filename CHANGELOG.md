@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.1
+
+- Keep active connection retries in the Reconnecting state, including attempts
+  such as 2/5 and 5/5 that run beyond 30 seconds.
+- Show Offline only after Codex ends a turn with a network error; other failed
+  requests continue to show Question.
+- Clear retry state from the previous turn when a new turn starts, even before
+  its first item appears.
+- Add regression coverage for retry progress, terminal failure, and a new turn.
+
 ## 0.2.0
 
 First public source and Windows package release.

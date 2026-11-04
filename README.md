@@ -61,8 +61,8 @@ Keep `CodexFloat.exe.config` next to the executable and keep the plugin's `ui`, 
 | --- | --- | --- |
 | Working | Rotating gray circle | A task is active. |
 | Question | Blue `? Question` pill | A synchronous input request, approval, or failed request needs attention. Chinese uses `? 问题`. |
-| Reconnecting | Wi-Fi bands appear from bottom to top | A connection retry was observed. |
-| Offline | Orange Wi-Fi icon with a slash and a pale orange pill | A connection retry has remained unresolved for about 30 seconds. |
+| Reconnecting | Wi-Fi bands appear from bottom to top | Codex is retrying an active turn, including its final numbered attempt. It remains reconnecting regardless of elapsed time until recovery or a terminal result. |
+| Offline | Orange Wi-Fi icon with a slash and a pale orange pill | Codex has ended the turn with a network error. Elapsed retry time alone never marks a chat offline. |
 | Completed | Animated green check | The row briefly remains, then fades, slides, and closes its space. |
 
 When collapsed, questions show a blue dot, offline chats an orange dot, and completed chats a green dot. Completion remains available until the panel is expanded. Ordinary work does not create a notification dot.

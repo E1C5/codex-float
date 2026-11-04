@@ -48,25 +48,31 @@ class QuotaTests(unittest.TestCase):
 
 
 class StateTests(unittest.TestCase):
-    def test_reconnect_becomes_offline_after_thirty_seconds(self):
-        self.assertEqual(classify_status("inProgress", 10, (20, 25), now=30)[0], "reconnecting")
-        self.assertEqual(classify_status("inProgress", 10, (20, 55), now=55)[0], "offline")
+    def test_active_retries_remain_reconnecting(self):
+        self.assertEqual(classify_status("inProgress", 10, (20, 25))[0], "reconnecting")
+        self.assertEqual(classify_status("inProgress", 10, (20, 55))[0], "reconnecting")
 
     def test_new_activity_clears_old_network_error(self):
-        self.assertEqual(classify_status("inProgress", 60, (20, 55), now=65)[0], "working")
+        self.assertEqual(classify_status("inProgress", 60, (20, 55))[0], "working")
 
-    def test_offline_does_not_turn_into_working_without_recovery(self):
-        self.assertEqual(classify_status("inProgress", 10, (20, 55), now=400)[0], "offline")
+    def test_hook_retry_stays_reconnecting_without_recovery(self):
+        hook = {"state": "reconnecting", "at": 55, "retrySince": 20}
+        self.assertEqual(classify_status("inProgress", 10, hook=hook)[0], "reconnecting")
+
+    def test_only_terminal_network_failure_is_offline(self):
+        error = json.dumps({"message": "stream disconnected before completion"})
+        self.assertEqual(classify_status("failed", 60, turn_error=error)[0], "offline")
+        self.assertEqual(classify_status("failed", 60, (20, 55), turn_error='{"message":"invalid request"}')[0], "question")
 
     def test_failed_or_interrupted_is_never_success(self):
-        self.assertEqual(classify_status("completed", 1, now=10)[0], "completed")
-        self.assertEqual(classify_status("failed", 1, now=10)[0], "question")
-        self.assertEqual(classify_status("interrupted", 1, now=10)[0], "interrupted")
+        self.assertEqual(classify_status("completed", 1)[0], "completed")
+        self.assertEqual(classify_status("failed", 1)[0], "question")
+        self.assertEqual(classify_status("interrupted", 1, (0, 2))[0], "interrupted")
 
     def test_pending_question_clears_after_new_activity(self):
         hook = {"state": "question", "at": 20}
-        self.assertEqual(classify_status("inProgress", 10, hook=hook, now=25)[0], "question")
-        self.assertEqual(classify_status("inProgress", 30, hook=hook, now=35)[0], "working")
+        self.assertEqual(classify_status("inProgress", 10, hook=hook)[0], "question")
+        self.assertEqual(classify_status("inProgress", 30, hook=hook)[0], "working")
 
     def test_hook_never_records_prompt_or_error_content(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -113,8 +119,8 @@ class HistoryTests(unittest.TestCase):
             catalog.executemany("INSERT INTO threads VALUES (?,?,?,?,?,0)", [("live", "工作对话", "title", None, None), ("stale", "old", "old", None, None)])
             catalog.commit(); catalog.close()
             history = sqlite3.connect(root / "thread_history_1.sqlite")
-            history.executescript("CREATE TABLE thread_turns(thread_id,turn_id,status,started_at,completed_at,rollout_ordinal); CREATE TABLE thread_items(thread_id,turn_id,created_at_ms,started_at_ms,completed_at_ms);")
-            history.executemany("INSERT INTO thread_turns VALUES (?,?,?,?,?,?)", [("live", "turn", "inProgress", 3900, None, 1), ("stale", "old-turn", "inProgress", 10, None, 1)])
+            history.executescript("CREATE TABLE thread_turns(thread_id,turn_id,status,started_at,completed_at,rollout_ordinal,error_json); CREATE TABLE thread_items(thread_id,turn_id,created_at_ms,started_at_ms,completed_at_ms);")
+            history.executemany("INSERT INTO thread_turns VALUES (?,?,?,?,?,?,?)", [("live", "turn", "inProgress", 3900, None, 1, None), ("stale", "old-turn", "inProgress", 10, None, 1, None)])
             history.execute("INSERT INTO thread_items VALUES ('live','turn',3990000,3990000,3995000)")
             history.commit()
             logs = sqlite3.connect(root / "logs_2.sqlite")
@@ -128,6 +134,41 @@ class HistoryTests(unittest.TestCase):
             with connect(root / "state_5.sqlite") as readonly:
                 with self.assertRaises(sqlite3.OperationalError):
                     readonly.execute("DELETE FROM threads")
+
+    def test_numbered_retries_stay_reconnecting_until_network_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            with contextlib.closing(sqlite3.connect(root / "state_5.sqlite")) as catalog:
+                catalog.execute("CREATE TABLE threads(id,name,title,agent_path,attached_thread_parent_id,archived)")
+                catalog.execute("INSERT INTO threads VALUES ('live','Demo chat','Demo chat',NULL,NULL,0)")
+                catalog.commit()
+            with contextlib.closing(sqlite3.connect(root / "thread_history_1.sqlite")) as history:
+                history.executescript("CREATE TABLE thread_turns(thread_id,turn_id,status,started_at,completed_at,rollout_ordinal,error_json); CREATE TABLE thread_items(thread_id,turn_id,created_at_ms,started_at_ms,completed_at_ms);")
+                history.execute("INSERT INTO thread_turns VALUES ('live','turn','inProgress',90,NULL,1,NULL)")
+                history.execute("INSERT INTO thread_items VALUES ('live','turn',100000,100000,100000)")
+                history.commit()
+            with contextlib.closing(sqlite3.connect(root / "logs_2.sqlite")) as logs:
+                logs.execute("CREATE TABLE logs(id,ts,thread_id,target,feedback_log_body)")
+                logs.executemany("INSERT INTO logs VALUES (?,?, 'live','codex_core::responses_retry',?)", [
+                    (1, 110, "stream disconnected - retrying turn (1/5 in 1s)"),
+                    (2, 150, "stream disconnected - retrying turn (2/5 in 2s)"),
+                ])
+                logs.commit()
+            store = ThreadStore(root, root / "own-data")
+            self.assertEqual(store.read(now=160)[0]["state"], "reconnecting")
+            self.assertEqual(store.read(now=210)[0]["state"], "reconnecting")
+            with contextlib.closing(sqlite3.connect(root / "logs_2.sqlite")) as logs:
+                logs.execute("INSERT INTO logs VALUES (3,220,'live','codex_core::responses_retry','stream disconnected - retrying turn (5/5 in 8s)')")
+                logs.commit()
+            self.assertEqual(store.read(now=250)[0]["state"], "reconnecting")
+            with contextlib.closing(sqlite3.connect(root / "thread_history_1.sqlite")) as history:
+                history.execute("UPDATE thread_turns SET status='failed',completed_at=260,error_json=?", (json.dumps({"message": "stream disconnected before completion"}),))
+                history.commit()
+            self.assertEqual(store.read(now=261)[0]["state"], "offline")
+            with contextlib.closing(sqlite3.connect(root / "thread_history_1.sqlite")) as history:
+                history.execute("INSERT INTO thread_turns VALUES ('live','new-turn','inProgress',270,NULL,2,NULL)")
+                history.commit()
+            self.assertEqual(store.read(now=271)[0]["state"], "working")
 
 
 if __name__ == "__main__":

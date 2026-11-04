@@ -140,13 +140,14 @@ class LogFeed:
             self.cursor = end
 
 
-def classify_status(turn_status, latest_activity, retry=None, hook=None, now=None):
-    now = time.time() if now is None else now
+def classify_status(turn_status, latest_activity, retry=None, hook=None, turn_error=None):
     if turn_status == "completed":
         return "completed", "已完成"
     if turn_status in ("interrupted", "cancelled"):
         return "interrupted", "已中断"
     if turn_status == "failed":
+        if NETWORK_ERROR.search(str(turn_error or "")):
+            return "offline", "连接已中断，正在等待网络恢复"
         return "question", "请求失败，需要处理"
     hook = hook or {}
     if hook.get("state") == "question" and hook.get("at", 0) >= latest_activity:
@@ -154,8 +155,6 @@ def classify_status(turn_status, latest_activity, retry=None, hook=None, now=Non
     if hook.get("state") == "reconnecting" and hook.get("at", 0) > latest_activity:
         retry = (hook.get("retrySince", hook["at"]), hook["at"])
     if retry and retry[1] > latest_activity:
-        if now - retry[0] >= 30:
-            return "offline", "连接已中断，正在等待网络恢复"
         return "reconnecting", "正在重新连接"
     return "working", "正在工作"
 
@@ -176,7 +175,7 @@ class ThreadStore:
             metadata = {row["id"]: dict(row) for row in db.execute(
                 "SELECT id,name,title,agent_path,attached_thread_parent_id FROM threads WHERE archived=0")}
         with connect(self.history) as db:
-            turns = db.execute("SELECT t.thread_id,t.turn_id,t.status,t.started_at,t.completed_at FROM thread_turns t "
+            turns = db.execute("SELECT t.thread_id,t.turn_id,t.status,t.started_at,t.completed_at,t.error_json FROM thread_turns t "
                                "JOIN (SELECT thread_id,MAX(rollout_ordinal) AS ordinal FROM thread_turns GROUP BY thread_id) n "
                                "ON n.thread_id=t.thread_id AND n.ordinal=t.rollout_ordinal "
                                "WHERE t.status IN ('inProgress','failed') OR t.completed_at>?", (now - 8,)).fetchall()
@@ -193,8 +192,8 @@ class ThreadStore:
                     continue
                 item = db.execute("SELECT MAX(COALESCE(completed_at_ms,started_at_ms,created_at_ms)) AS at "
                                   "FROM thread_items WHERE thread_id=? AND turn_id=?", (thread_id, turn["turn_id"])).fetchone()
-                item_at = (item["at"] or 0) / 1000
-                activity = max(item_at, self.feed.activity.get(thread_id, 0), turn["started_at"] or 0)
+                item_at = max((item["at"] or 0) / 1000, turn["started_at"] or 0)
+                activity = max(item_at, self.feed.activity.get(thread_id, 0))
                 hook = read_json(self.data_dir / "events" / (thread_id + ".json"))
                 if hook.get("turnId") not in (None, turn["turn_id"]):
                     hook = {}
@@ -203,7 +202,7 @@ class ThreadStore:
                     continue
                 if turn["status"] == "failed" and (turn["completed_at"] or activity) < now - 600:
                     continue
-                state, detail = classify_status(turn["status"], item_at, self.feed.retries.get(thread_id), hook, now)
+                state, detail = classify_status(turn["status"], item_at, self.feed.retries.get(thread_id), hook, turn["error_json"])
                 title = (meta.get("name") or meta.get("title") or "未命名对话").strip().splitlines()[0][:300]
                 result.append({"id": thread_id, "turnId": turn["turn_id"], "title": title,
                                "state": state, "detail": detail, "updatedAt": activity})
