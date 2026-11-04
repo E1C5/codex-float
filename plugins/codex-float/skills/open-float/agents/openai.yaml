@@ -1,0 +1,6 @@
+interface:
+  display_name: "Open Codex Float"
+  short_description: "Show active Codex chats, status, and remaining quota"
+  default_prompt: "Open the Codex Float desktop widget."
+policy:
+  allow_implicit_invocation: false

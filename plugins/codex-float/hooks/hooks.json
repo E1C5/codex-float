@@ -1,0 +1,125 @@
+{
+  "description": "Record status events and launch Codex Float when a session starts. Never approve, block, or change an action.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${PLUGIN_ROOT}/runtime/hook.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}/runtime/hook.py\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${PLUGIN_ROOT}/runtime/hook.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}/runtime/hook.py\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${PLUGIN_ROOT}/runtime/hook.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}/runtime/hook.py\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${PLUGIN_ROOT}/runtime/hook.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}/runtime/hook.py\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${PLUGIN_ROOT}/runtime/hook.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}/runtime/hook.py\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PreModelRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${PLUGIN_ROOT}/runtime/hook.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}/runtime/hook.py\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PostModelRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${PLUGIN_ROOT}/runtime/hook.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}/runtime/hook.py\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${PLUGIN_ROOT}/runtime/hook.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}/runtime/hook.py\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Interrupt": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${PLUGIN_ROOT}/runtime/hook.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}/runtime/hook.py\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${PLUGIN_ROOT}/runtime/hook.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}/runtime/hook.py\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

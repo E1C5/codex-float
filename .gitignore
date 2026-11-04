@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.tmp
+*.log
+.env
+.env.*
+dist/
+plugins/codex-float/bin/*
+!plugins/codex-float/bin/CodexFloat.exe
+!plugins/codex-float/bin/CodexFloat.exe.config

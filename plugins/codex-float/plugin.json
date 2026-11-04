@@ -1,0 +1,22 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "codex-float",
+  "version": "0.2.0",
+  "description": "An always-on-top Windows companion for active Codex chats, connection status, and remaining quota.",
+  "author": { "name": "Liu12345678-Liu", "url": "https://github.com/Liu12345678-Liu" },
+  "extensions": {
+    "com.openai": {
+      "hooks": "./hooks/hooks.json",
+      "interface": {
+        "displayName": "Codex Float",
+        "shortDescription": "Active chats and quota at a glance",
+        "longDescription": "A draggable Windows desktop companion for Codex. Follow working chats, questions, reconnecting and offline states; open any chat with one click. View short-term and weekly quota with reset countdowns. Includes English and Chinese, dark and light themes, adjustable size, and a compact notification icon.",
+        "developerName": "Liu12345678-Liu",
+        "category": "Developer Tools",
+        "capabilities": ["Read"],
+        "composerIcon": "./assets/icon.svg",
+        "logo": "./assets/icon.svg"
+      }
+    }
+  }
+}

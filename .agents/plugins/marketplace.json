@@ -1,0 +1,12 @@
+{
+  "name": "codex-float",
+  "interface": { "displayName": "Codex Float" },
+  "plugins": [
+    {
+      "name": "codex-float",
+      "source": { "source": "local", "path": "./plugins/codex-float" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Developer Tools"
+    }
+  ]
+}
