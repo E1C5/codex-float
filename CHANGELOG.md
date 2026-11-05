@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.4
+
+- Show asynchronous questions in active Codex chats, including sessions that
+  do not emit Float hook events.
+- Keep the Question state while the chat continues other work or still has
+  unanswered questions. Match structured replies to their specific question.
+- Add regression coverage for partial answers, stale history indexes and
+  turn transitions without retaining question or answer text.
+
 ## 0.2.3
 
 - Detect a new running root chat even when Codex's history index still contains

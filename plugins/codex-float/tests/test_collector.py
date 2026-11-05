@@ -114,7 +114,7 @@ class RolloutTests(unittest.TestCase):
             with path.open("a", encoding="utf-8") as stream:
                 stream.write("\n")
             self.assertEqual(feed.read(str(path))["status"], "completed")
-            self.assertNotIn("PRIVATE_CONTENT", json.dumps(feed.files))
+            self.assertNotIn("PRIVATE_CONTENT", repr(feed.files))
             start["payload"]["turn_id"] = "second"
             path.write_text(json.dumps(start) + "\n", encoding="utf-8")
             self.assertEqual(feed.read(str(path))["turn_id"], "second")
@@ -128,6 +128,81 @@ class RolloutTests(unittest.TestCase):
 
 
 class HistoryTests(unittest.TestCase):
+    def test_async_question_remains_pending_until_each_structured_reply(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            rollout = root / "async-question.jsonl"
+
+            def append(kind, at, **payload):
+                stamp = datetime.fromtimestamp(at, timezone.utc).isoformat()
+                with rollout.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps({"timestamp": stamp, "type": kind, "payload": payload}) + "\n")
+
+            def question(at, call_id, turn_id="turn"):
+                append("event_msg", at, type="item_completed", turn_id=turn_id, item={
+                    "type": "AgentMessage", "id": call_id, "delivery": "async", "phase": "final_answer",
+                    "questions": [
+                        {"title": "PRIVATE_QUESTION_ONE", "options": ["PRIVATE_OPTION"]},
+                        {"title": "PRIVATE_QUESTION_TWO", "options": ["PRIVATE_OPTION"]},
+                    ],
+                })
+
+            def reply(at, index, call_id="call_example", prefix=""):
+                answers = [{"questionItemId": json.dumps(["request_user_input_async", call_id, index]),
+                            "answer": "PRIVATE_ANSWER"}]
+                text = f"{prefix}<send_user_message_question_reply>\n{json.dumps(answers)}\n</send_user_message_question_reply>\n"
+                append("response_item", at, type="message", role="user",
+                       content=[{"type": "input_text", "text": text}],
+                       internal_chat_message_metadata_passthrough={"turn_id": "turn"})
+
+            with contextlib.closing(sqlite3.connect(root / "state_5.sqlite")) as catalog:
+                catalog.execute("CREATE TABLE threads(id,name,title,agent_path,attached_thread_parent_id,archived,rollout_path)")
+                catalog.execute("INSERT INTO threads VALUES ('live','Demo chat','Demo chat',NULL,NULL,0,?)", (str(rollout),))
+                catalog.commit()
+            with contextlib.closing(sqlite3.connect(root / "thread_history_1.sqlite")) as history:
+                history.executescript("CREATE TABLE thread_turns(thread_id,turn_id,status,started_at,completed_at,rollout_ordinal,error_json); CREATE TABLE thread_items(thread_id,turn_id,created_at_ms,started_at_ms,completed_at_ms);")
+                history.execute("INSERT INTO thread_turns VALUES ('live','turn','inProgress',100,NULL,1,NULL)")
+                history.commit()
+            with contextlib.closing(sqlite3.connect(root / "logs_2.sqlite")) as logs:
+                logs.execute("CREATE TABLE logs(id,ts,thread_id,target,feedback_log_body)")
+                logs.commit()
+
+            store = ThreadStore(root, root / "own-data")
+            append("event_msg", 100, type="task_started", turn_id="turn")
+            self.assertEqual(store.read(now=101)[0]["state"], "working")
+            question(102, "call_example")
+            append("response_item", 103, type="function_call_output", call_id="call_example", output='{"accepted":true}')
+            append("event_msg", 104, type="item_completed", turn_id="turn", item={"type": "CommandExecution"})
+            snapshot = store.read(now=105)
+            self.assertEqual(snapshot[0]["state"], "question")
+            self.assertNotIn("PRIVATE_", json.dumps(snapshot))
+            self.assertNotIn("PRIVATE_", repr(store.rollouts.files))
+            self.assertEqual(store.read(now=2000)[0]["state"], "question")
+
+            reply(2001, 1, prefix="Quoted example: ")
+            reply(2002, 0, call_id="other_call")
+            reply(2003, 0)
+            reply(2004, 0)
+            self.assertEqual(store.read(now=2005)[0]["state"], "question")
+            reply(2006, 1)
+            resumed = store.read(now=2007)
+            self.assertEqual(resumed[0]["state"], "working")
+            self.assertNotIn("PRIVATE_", json.dumps(resumed))
+
+            question(2008, "call_unanswered")
+            self.assertEqual(store.read(now=2009)[0]["state"], "question")
+            append("event_msg", 2010, type="task_complete", turn_id="turn")
+            self.assertFalse(store.rollouts.read(str(rollout))["pending_question"])
+            with contextlib.closing(sqlite3.connect(root / "thread_history_1.sqlite")) as history:
+                history.execute("UPDATE thread_turns SET status='completed',completed_at=2010 WHERE turn_id='turn'")
+                history.commit()
+                self.assertEqual(store.read(now=2011)[0]["state"], "completed")
+                history.execute("INSERT INTO thread_turns VALUES ('live','new-turn','inProgress',2012,NULL,2,NULL)")
+                history.commit()
+            append("event_msg", 2012, type="task_started", turn_id="new-turn")
+            question(2013, "call_from_old_turn")
+            self.assertEqual(store.read(now=2014)[0]["state"], "working")
+
     def test_two_working_roots_are_visible_when_one_history_index_is_stale(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -166,6 +241,12 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual({r["id"] for r in active}, {"indexed", "lagging"})
             self.assertEqual({r["state"] for r in active}, {"working"})
             self.assertNotIn("PRIVATE_CONTENT", json.dumps(active))
+            append("event_msg", 122, type="item_completed", turn_id="fresh-turn", item={
+                "type": "AgentMessage", "id": "call_lagging", "delivery": "async",
+                "questions": [{"title": "PRIVATE_CONTENT", "options": []}],
+            })
+            self.assertEqual({r["id"]: r["state"] for r in store.read(now=122)},
+                             {"indexed": "working", "lagging": "question"})
             append("event_msg", 123, type="task_complete", turn_id="fresh-turn", last_agent_message="PRIVATE_CONTENT")
             self.assertEqual(next(r["state"] for r in store.read(now=124) if r["id"] == "lagging"), "completed")
             self.assertNotIn("lagging", {r["id"] for r in store.read(now=132)})

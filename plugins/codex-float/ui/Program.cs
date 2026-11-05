@@ -24,7 +24,7 @@ using System.Windows.Threading;
 using System.Xml;
 
 [assembly: System.Runtime.Versioning.TargetFramework(".NETFramework,Version=v4.8",FrameworkDisplayName=".NET Framework 4.8")]
-[assembly: AssemblyVersion("0.2.3.0")]
+[assembly: AssemblyVersion("0.2.4.0")]
 
 namespace CodexFloat {
   public static class L {

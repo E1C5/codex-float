@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "codex-float",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "An always-on-top Windows companion for active Codex chats, connection status, and remaining quota.",
   "author": { "name": "Liu12345678-Liu", "url": "https://github.com/Liu12345678-Liu" },
   "extensions": {

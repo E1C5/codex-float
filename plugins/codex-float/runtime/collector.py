@@ -19,6 +19,8 @@ NETWORK_ERROR = re.compile(r"network|connect(?:ion)?|disconnected|timed? ?out|ti
 NETWORK_WAIT = re.compile(r"stream connection failed;\s*waiting to retry|waiting for network|等待网络", re.I)
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 RUN_TURN = re.compile(r'(?:^|:)run_turn\{[^}]*\b(?:turn\.id|turn_id)="?([A-Za-z0-9_-]{1,100})\b')
+QUESTION_REPLY_OPEN = "<send_user_message_question_reply>"
+QUESTION_REPLY_CLOSE = "</send_user_message_question_reply>"
 
 
 def atomic_json(path, value):
@@ -160,7 +162,7 @@ class RolloutFeed:
                 identity = (stat.st_dev, stat.st_ino)
                 entry = self.files.get(path)
                 if not entry or entry["identity"] != identity or stat.st_size < entry["offset"]:
-                    entry = {"identity": identity, "offset": 0, "turn": None, "activity": 0}
+                    entry = {"identity": identity, "offset": 0, "turn": None, "activity": 0, "questions": set()}
                     self.files[path] = entry
                 stream.seek(entry["offset"])
                 while stream.tell() < stat.st_size:
@@ -175,10 +177,12 @@ class RolloutFeed:
                         at = datetime.fromisoformat(value["timestamp"].replace("Z", "+00:00")).timestamp()
                     except (ValueError, KeyError, TypeError, AttributeError, OSError, OverflowError):
                         continue
+                    payload = value.get("payload")
                     if value["type"] == "response_item":
                         entry["activity"] = max(entry["activity"], at)
+                        if entry["questions"] and isinstance(payload, dict):
+                            entry["questions"].difference_update(question_replies(payload))
                         continue
-                    payload = value.get("payload")
                     if not isinstance(payload, dict):
                         continue
                     event, turn_id = payload.get("type"), payload.get("turn_id")
@@ -188,17 +192,59 @@ class RolloutFeed:
                         entry["turn"] = {"turn_id": turn_id, "status": "inProgress", "started_at": at,
                                          "completed_at": None, "error_json": None}
                         entry["activity"] = at
-                    elif event in ("task_complete", "turn_aborted") and entry["turn"] and entry["turn"]["turn_id"] == turn_id:
-                        entry["turn"]["status"] = "completed" if event == "task_complete" else "interrupted"
-                        entry["turn"]["completed_at"] = at
+                        entry["questions"].clear()
+                    elif entry["turn"] and entry["turn"]["turn_id"] == turn_id:
+                        if event in ("task_complete", "turn_aborted"):
+                            entry["turn"]["status"] = "completed" if event == "task_complete" else "interrupted"
+                            entry["turn"]["completed_at"] = at
+                            entry["questions"].clear()
+                        elif event == "item_completed" and entry["turn"]["status"] == "inProgress":
+                            item = payload.get("item")
+                            if isinstance(item, dict) and item.get("type") == "AgentMessage" and item.get("delivery") == "async":
+                                card, questions = item.get("id"), item.get("questions")
+                                if isinstance(card, str) and SAFE_ID.fullmatch(card) and isinstance(questions, list):
+                                    entry["questions"].update((card, i) for i, question in enumerate(questions)
+                                                              if isinstance(question, dict))
                 if entry["turn"]:
-                    return dict(entry["turn"], activity_at=entry["activity"])
+                    return dict(entry["turn"], activity_at=entry["activity"], pending_question=bool(entry["questions"]))
         except OSError:
             return None
         return None
 
 
-def classify_status(turn_status, latest_activity, retry=None, hook=None, turn_error=None):
+def question_replies(payload):
+    if payload.get("type") != "message" or payload.get("role") != "user":
+        return
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return
+    for part in content:
+        text = part.get("text") if isinstance(part, dict) else None
+        if not isinstance(text, str) or not text.startswith(QUESTION_REPLY_OPEN):
+            continue
+        text = text.rstrip()
+        if not text.endswith(QUESTION_REPLY_CLOSE):
+            continue
+        try:
+            replies = json.loads(text[len(QUESTION_REPLY_OPEN):-len(QUESTION_REPLY_CLOSE)])
+        except ValueError:
+            continue
+        if not isinstance(replies, list):
+            continue
+        for reply in replies:
+            identifier = reply.get("questionItemId") if isinstance(reply, dict) else None
+            if not isinstance(identifier, str):
+                continue
+            try:
+                key = json.loads(identifier)
+            except ValueError:
+                continue
+            if (isinstance(key, list) and len(key) == 3 and key[0] == "request_user_input_async"
+                    and isinstance(key[1], str) and type(key[2]) is int):
+                yield key[1], key[2]
+
+
+def classify_status(turn_status, latest_activity, retry=None, hook=None, turn_error=None, pending_question=False):
     if turn_status == "completed":
         return "completed", "已完成"
     if turn_status in ("interrupted", "cancelled"):
@@ -208,7 +254,7 @@ def classify_status(turn_status, latest_activity, retry=None, hook=None, turn_er
             return "offline", "连接已中断，正在等待网络恢复"
         return "question", "请求失败，需要处理"
     hook = hook or {}
-    if hook.get("state") == "question" and hook.get("at", 0) >= latest_activity:
+    if pending_question or (hook.get("state") == "question" and hook.get("at", 0) >= latest_activity):
         return "question", "等待你的处理"
     # A request hook alone does not prove that a network wait has ended.
     if retry and retry[0] > latest_activity:
@@ -267,17 +313,24 @@ class ThreadStore:
                     continue
                 item = db.execute("SELECT MAX(COALESCE(completed_at_ms,started_at_ms,created_at_ms)) AS at "
                                   "FROM thread_items WHERE thread_id=? AND turn_id=?", (thread_id, turn["turn_id"])).fetchone()
-                item_at = max((item["at"] or 0) / 1000, turn["started_at"] or 0, turn.get("activity_at", 0))
+                live = self.rollouts.read(meta.get("rollout_path")) if turn["status"] == "inProgress" else None
+                if live and live["turn_id"] != turn["turn_id"]:
+                    live = None
+                pending_question = bool(live and live["pending_question"])
+                item_at = max((item["at"] or 0) / 1000, turn["started_at"] or 0, turn.get("activity_at", 0),
+                              live["activity_at"] if live else 0)
                 activity = max(item_at, self.feed.activity.get(thread_id, 0))
                 hook = read_json(self.data_dir / "events" / (thread_id + ".json"))
                 if hook.get("turnId") not in (None, turn["turn_id"]):
                     hook = {}
                 # shortcut: old unfinished records lack process liveness; ignore them after 30 quiet minutes.
-                if turn["status"] == "inProgress" and hook.get("state") != "question" and max(activity, hook.get("at", 0)) < now - 1800:
+                if (turn["status"] == "inProgress" and not pending_question and hook.get("state") != "question"
+                        and max(activity, hook.get("at", 0)) < now - 1800):
                     continue
                 if turn["status"] == "failed" and (turn["completed_at"] or activity) < now - 600:
                     continue
-                state, detail = classify_status(turn["status"], item_at, self.feed.retries.get(thread_id), hook, turn["error_json"])
+                state, detail = classify_status(turn["status"], item_at, self.feed.retries.get(thread_id), hook,
+                                                turn["error_json"], pending_question)
                 title = (meta.get("name") or meta.get("title") or "未命名对话").strip().splitlines()[0][:300]
                 result.append({"id": thread_id, "turnId": turn["turn_id"], "title": title,
                                "state": state, "detail": detail, "updatedAt": activity})

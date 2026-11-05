@@ -36,7 +36,7 @@ class AppServer:
         threading.Thread(target=self._read, daemon=True).start()
         try:
             self.request("initialize", {"clientInfo": {
-                "name": "codex_float", "title": "Codex Float", "version": "0.2.3"
+                "name": "codex_float", "title": "Codex Float", "version": "0.2.4"
             }}, timeout=8, initializing=True)
             self._send({"method": "initialized", "params": {}})
         except Exception:
