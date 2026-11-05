@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.3
+
+- Detect a new running root chat even when Codex's history index still contains
+  an older interrupted or completed turn.
+- Confirm missing turns with live execution spans and incremental rollout
+  lifecycle metadata; opening an old chat does not mark it as working.
+- Follow completion and interruption for these turns, exclude subagents, and
+  retain only lifecycle/activity metadata in memory.
+- Cover two simultaneous working chats, stale indexes, partial writes, file
+  truncation, missing files, completion, and interruption in regression tests.
+
 ## 0.2.2
 
 - Recognize explicit connection-failed/network-wait log messages as Offline,

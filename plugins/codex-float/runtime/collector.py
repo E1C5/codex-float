@@ -2,6 +2,7 @@
 
 import argparse
 from contextlib import contextmanager
+from datetime import datetime
 import hashlib
 import json
 import math
@@ -17,6 +18,7 @@ from rpc import AppServer
 NETWORK_ERROR = re.compile(r"network|connect(?:ion)?|disconnected|timed? ?out|timeout|dns|resolve|stream.*(?:closed|error)|网络|重连|连接", re.I)
 NETWORK_WAIT = re.compile(r"stream connection failed;\s*waiting to retry|waiting for network|等待网络", re.I)
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
+RUN_TURN = re.compile(r'(?:^|:)run_turn\{[^}]*\b(?:turn\.id|turn_id)="?([A-Za-z0-9_-]{1,100})\b')
 
 
 def atomic_json(path, value):
@@ -121,6 +123,7 @@ class LogFeed:
         self.cursor = None
         self.activity = {}
         self.retries = {}
+        self.turns = {}
 
     def poll(self):
         with connect(self.path) as db:
@@ -132,12 +135,67 @@ class LogFeed:
             for row in rows:
                 thread, stamp = row["thread_id"], row["ts"]
                 self.activity[thread] = max(stamp, self.activity.get(thread, 0))
+                body = row["feedback_log_body"] or ""
+                running = RUN_TURN.search(body)
+                if running:
+                    self.turns[thread] = (running[1], stamp)
                 if row["target"] == "codex_core::responses_retry":
-                    body = (row["feedback_log_body"] or "")[-1800:]
+                    body = body[-1800:]
                     if NETWORK_ERROR.search(body):
                         state = "offline" if NETWORK_WAIT.search(body) else "reconnecting"
                         self.retries[thread] = (stamp, state)
             self.cursor = end
+
+
+class RolloutFeed:
+    def __init__(self):
+        self.files = {}
+
+    def read(self, path):
+        if not path:
+            return None
+        try:
+            with open(path, "rb") as stream:
+                stat = os.fstat(stream.fileno())
+                identity = (stat.st_dev, stat.st_ino)
+                entry = self.files.get(path)
+                if not entry or entry["identity"] != identity or stat.st_size < entry["offset"]:
+                    entry = {"identity": identity, "offset": 0, "turn": None, "activity": 0}
+                    self.files[path] = entry
+                stream.seek(entry["offset"])
+                while stream.tell() < stat.st_size:
+                    line = stream.readline()
+                    if not line.endswith(b"\n"):
+                        break
+                    entry["offset"] = stream.tell()
+                    try:
+                        value = json.loads(line)
+                        if not isinstance(value, dict) or value.get("type") not in ("event_msg", "response_item"):
+                            continue
+                        at = datetime.fromisoformat(value["timestamp"].replace("Z", "+00:00")).timestamp()
+                    except (ValueError, KeyError, TypeError, AttributeError, OSError, OverflowError):
+                        continue
+                    if value["type"] == "response_item":
+                        entry["activity"] = max(entry["activity"], at)
+                        continue
+                    payload = value.get("payload")
+                    if not isinstance(payload, dict):
+                        continue
+                    event, turn_id = payload.get("type"), payload.get("turn_id")
+                    if not isinstance(turn_id, str) or not SAFE_ID.fullmatch(turn_id):
+                        continue
+                    if event == "task_started":
+                        entry["turn"] = {"turn_id": turn_id, "status": "inProgress", "started_at": at,
+                                         "completed_at": None, "error_json": None}
+                        entry["activity"] = at
+                    elif event in ("task_complete", "turn_aborted") and entry["turn"] and entry["turn"]["turn_id"] == turn_id:
+                        entry["turn"]["status"] = "completed" if event == "task_complete" else "interrupted"
+                        entry["turn"]["completed_at"] = at
+                if entry["turn"]:
+                    return dict(entry["turn"], activity_at=entry["activity"])
+        except OSError:
+            return None
+        return None
 
 
 def classify_status(turn_status, latest_activity, retry=None, hook=None, turn_error=None):
@@ -168,6 +226,7 @@ class ThreadStore:
         self.history = database(root, "thread_history")
         self.catalog = database(root, "state")
         self.feed = LogFeed(root)
+        self.rollouts = RolloutFeed()
         self.observed = set()
         self.started_at = time.time()
 
@@ -176,14 +235,27 @@ class ThreadStore:
         self.feed.poll()
         with connect(self.catalog) as db:
             metadata = {row["id"]: dict(row) for row in db.execute(
-                "SELECT id,name,title,agent_path,attached_thread_parent_id FROM threads WHERE archived=0")}
+                "SELECT id,name,title,agent_path,attached_thread_parent_id,rollout_path FROM threads WHERE archived=0")}
         with connect(self.history) as db:
             turns = db.execute("SELECT t.thread_id,t.turn_id,t.status,t.started_at,t.completed_at,t.error_json FROM thread_turns t "
                                "JOIN (SELECT thread_id,MAX(rollout_ordinal) AS ordinal FROM thread_turns GROUP BY thread_id) n "
                                "ON n.thread_id=t.thread_id AND n.ordinal=t.rollout_ordinal "
                                "WHERE t.status IN ('inProgress','failed') OR t.completed_at>?", (now - 8,)).fetchall()
+            turns = {row["thread_id"]: dict(row) for row in turns}
+            for thread_id, (turn_id, stamp) in self.feed.turns.items():
+                meta, indexed = metadata.get(thread_id), turns.get(thread_id)
+                if not meta or stamp < now - 1800 or (indexed and indexed["turn_id"] == turn_id):
+                    continue
+                if meta.get("attached_thread_parent_id") or meta.get("agent_path") not in (None, "", "/root", "root"):
+                    continue
+                live = self.rollouts.read(meta.get("rollout_path"))
+                if not live or live["turn_id"] != turn_id or (indexed and (indexed["started_at"] or 0) >= live["started_at"]):
+                    continue
+                if live["status"] != "inProgress" and (live["completed_at"] or 0) <= now - 8:
+                    continue
+                turns[thread_id] = dict(live, thread_id=thread_id)
             result = []
-            for turn in turns:
+            for turn in turns.values():
                 thread_id = turn["thread_id"]
                 meta = metadata.get(thread_id)
                 if not meta or not SAFE_ID.fullmatch(thread_id) or meta.get("attached_thread_parent_id"):
@@ -195,7 +267,7 @@ class ThreadStore:
                     continue
                 item = db.execute("SELECT MAX(COALESCE(completed_at_ms,started_at_ms,created_at_ms)) AS at "
                                   "FROM thread_items WHERE thread_id=? AND turn_id=?", (thread_id, turn["turn_id"])).fetchone()
-                item_at = max((item["at"] or 0) / 1000, turn["started_at"] or 0)
+                item_at = max((item["at"] or 0) / 1000, turn["started_at"] or 0, turn.get("activity_at", 0))
                 activity = max(item_at, self.feed.activity.get(thread_id, 0))
                 hook = read_json(self.data_dir / "events" / (thread_id + ".json"))
                 if hook.get("turnId") not in (None, turn["turn_id"]):

@@ -2,6 +2,7 @@ import json
 import contextlib
 import io
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
 import sys
@@ -10,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "runtime"))
-from collector import normalize_quota, classify_status, ThreadStore, connect, main, parent_alive
+from collector import normalize_quota, classify_status, ThreadStore, RolloutFeed, connect, main, parent_alive
 from hook import record
 from rpc import AppServer
 
@@ -101,7 +102,82 @@ class StateTests(unittest.TestCase):
             client.request("turn/start")
 
 
+class RolloutTests(unittest.TestCase):
+    def test_incremental_reader_waits_for_full_lines_and_handles_truncation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "demo.jsonl"
+            start = {"timestamp": "2026-01-01T00:00:00Z", "type": "event_msg", "payload": {"type": "task_started", "turn_id": "first"}}
+            end = {"timestamp": "2026-01-01T00:00:01Z", "type": "event_msg", "payload": {"type": "task_complete", "turn_id": "first", "last_agent_message": "PRIVATE_CONTENT"}}
+            path.write_text(json.dumps(start) + "\n" + json.dumps(end), encoding="utf-8")
+            feed = RolloutFeed()
+            self.assertEqual(feed.read(str(path))["status"], "inProgress")
+            with path.open("a", encoding="utf-8") as stream:
+                stream.write("\n")
+            self.assertEqual(feed.read(str(path))["status"], "completed")
+            self.assertNotIn("PRIVATE_CONTENT", json.dumps(feed.files))
+            start["payload"]["turn_id"] = "second"
+            path.write_text(json.dumps(start) + "\n", encoding="utf-8")
+            self.assertEqual(feed.read(str(path))["turn_id"], "second")
+            self.assertEqual(feed.read(str(path))["status"], "inProgress")
+
+    def test_missing_rollout_is_not_reported_as_working(self):
+        feed = RolloutFeed()
+        self.assertIsNone(feed.read(None))
+        with tempfile.TemporaryDirectory() as folder:
+            self.assertIsNone(feed.read(str(Path(folder) / "missing.jsonl")))
+
+
 class HistoryTests(unittest.TestCase):
+    def test_two_working_roots_are_visible_when_one_history_index_is_stale(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            rollout = root / "lagging.jsonl"
+            def append(kind, at, **payload):
+                with rollout.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps({"timestamp": datetime.fromtimestamp(at, timezone.utc).isoformat(), "type": kind, "payload": payload}) + "\n")
+            append("event_msg", 100, type="task_started", turn_id="fresh-turn")
+            append("response_item", 118, type="message", content="PRIVATE_CONTENT")
+            with contextlib.closing(sqlite3.connect(root / "state_5.sqlite")) as catalog:
+                catalog.execute("CREATE TABLE threads(id,name,title,agent_path,attached_thread_parent_id,archived,rollout_path)")
+                catalog.executemany("INSERT INTO threads VALUES (?,?,?,?,?,?,?)", [
+                    ("indexed", "First chat", "First chat", None, None, 0, None),
+                    ("lagging", "Second chat", "Second chat", None, None, 0, str(rollout)),
+                    ("child", "Child", "Child", "/root/child", "lagging", 0, str(rollout)),
+                    ("idle", "Idle chat", "Idle chat", None, None, 0, str(rollout)),
+                ])
+                catalog.commit()
+            with contextlib.closing(sqlite3.connect(root / "thread_history_1.sqlite")) as history:
+                history.executescript("CREATE TABLE thread_turns(thread_id,turn_id,status,started_at,completed_at,rollout_ordinal,error_json); CREATE TABLE thread_items(thread_id,turn_id,created_at_ms,started_at_ms,completed_at_ms);")
+                history.executemany("INSERT INTO thread_turns VALUES (?,?,?,?,?,?,?)", [
+                    ("indexed", "indexed-turn", "inProgress", 100, None, 1, None),
+                    ("lagging", "old-turn", "interrupted", 10, 20, 1, None),
+                ])
+                history.commit()
+            with contextlib.closing(sqlite3.connect(root / "logs_2.sqlite")) as logs:
+                logs.execute("CREATE TABLE logs(id,ts,thread_id,target,feedback_log_body)")
+                logs.executemany("INSERT INTO logs VALUES (?,?,?,?,?)", [
+                    (1, 119, "lagging", "codex_core::stream_events_utils", "session_loop{thread_id=lagging}:run_turn{conversation.id=lagging turn.id=fresh-turn}: received item"),
+                    (2, 119, "child", "codex_core::stream_events_utils", "session_loop{thread_id=child}:run_turn{turn.id=fresh-turn}: received item"),
+                    (3, 119, "idle", "viewer", "opened conversation"),
+                ])
+                logs.commit()
+            store = ThreadStore(root, root / "own-data")
+            active = store.read(now=120)
+            self.assertEqual({r["id"] for r in active}, {"indexed", "lagging"})
+            self.assertEqual({r["state"] for r in active}, {"working"})
+            self.assertNotIn("PRIVATE_CONTENT", json.dumps(active))
+            append("event_msg", 123, type="task_complete", turn_id="fresh-turn", last_agent_message="PRIVATE_CONTENT")
+            self.assertEqual(next(r["state"] for r in store.read(now=124) if r["id"] == "lagging"), "completed")
+            self.assertNotIn("lagging", {r["id"] for r in store.read(now=132)})
+            append("event_msg", 140, type="task_started", turn_id="next-turn")
+            with contextlib.closing(sqlite3.connect(root / "logs_2.sqlite")) as logs:
+                logs.execute("INSERT INTO logs VALUES (4,141,'lagging','codex_core::stream_events_utils','session_loop{thread_id=lagging}:run_turn{turn.id=next-turn}: received item')")
+                logs.commit()
+            append("event_msg", 142, type="task_complete", turn_id="fresh-turn")
+            self.assertEqual(next(r["state"] for r in store.read(now=143) if r["id"] == "lagging"), "working")
+            append("event_msg", 144, type="turn_aborted", turn_id="next-turn")
+            self.assertEqual(next(r["state"] for r in store.read(now=145) if r["id"] == "lagging"), "interrupted")
+
     def test_first_launch_without_databases_still_publishes_quota(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -122,8 +198,8 @@ class HistoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             catalog = sqlite3.connect(root / "state_5.sqlite")
-            catalog.execute("CREATE TABLE threads(id,name,title,agent_path,attached_thread_parent_id,archived)")
-            catalog.executemany("INSERT INTO threads VALUES (?,?,?,?,?,0)", [("live", "工作对话", "title", None, None), ("stale", "old", "old", None, None)])
+            catalog.execute("CREATE TABLE threads(id,name,title,agent_path,attached_thread_parent_id,archived,rollout_path)")
+            catalog.executemany("INSERT INTO threads VALUES (?,?,?,?,?,0,NULL)", [("live", "工作对话", "title", None, None), ("stale", "old", "old", None, None)])
             catalog.commit(); catalog.close()
             history = sqlite3.connect(root / "thread_history_1.sqlite")
             history.executescript("CREATE TABLE thread_turns(thread_id,turn_id,status,started_at,completed_at,rollout_ordinal,error_json); CREATE TABLE thread_items(thread_id,turn_id,created_at_ms,started_at_ms,completed_at_ms);")
@@ -146,8 +222,8 @@ class HistoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             with contextlib.closing(sqlite3.connect(root / "state_5.sqlite")) as catalog:
-                catalog.execute("CREATE TABLE threads(id,name,title,agent_path,attached_thread_parent_id,archived)")
-                catalog.execute("INSERT INTO threads VALUES ('live','Demo chat','Demo chat',NULL,NULL,0)")
+                catalog.execute("CREATE TABLE threads(id,name,title,agent_path,attached_thread_parent_id,archived,rollout_path)")
+                catalog.execute("INSERT INTO threads VALUES ('live','Demo chat','Demo chat',NULL,NULL,0,NULL)")
                 catalog.commit()
             with contextlib.closing(sqlite3.connect(root / "thread_history_1.sqlite")) as history:
                 history.executescript("CREATE TABLE thread_turns(thread_id,turn_id,status,started_at,completed_at,rollout_ordinal,error_json); CREATE TABLE thread_items(thread_id,turn_id,created_at_ms,started_at_ms,completed_at_ms);")
@@ -181,8 +257,8 @@ class HistoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             with contextlib.closing(sqlite3.connect(root / "state_5.sqlite")) as catalog:
-                catalog.execute("CREATE TABLE threads(id,name,title,agent_path,attached_thread_parent_id,archived)")
-                catalog.execute("INSERT INTO threads VALUES ('live','Demo chat','Demo chat',NULL,NULL,0)")
+                catalog.execute("CREATE TABLE threads(id,name,title,agent_path,attached_thread_parent_id,archived,rollout_path)")
+                catalog.execute("INSERT INTO threads VALUES ('live','Demo chat','Demo chat',NULL,NULL,0,NULL)")
                 catalog.commit()
             with contextlib.closing(sqlite3.connect(root / "thread_history_1.sqlite")) as history:
                 history.executescript("CREATE TABLE thread_turns(thread_id,turn_id,status,started_at,completed_at,rollout_ordinal,error_json); CREATE TABLE thread_items(thread_id,turn_id,created_at_ms,started_at_ms,completed_at_ms);")

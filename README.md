@@ -93,7 +93,7 @@ Use **Settings → Exit widget** to close the window. Launch it again with the c
 
 ## Data and compatibility
 
-The widget reads Codex's local conversation catalog, turn history, and retry logs in SQLite read-only mode. Plugin hooks record only lifecycle state, IDs, and timestamps. Quota uses Codex's official app-server account endpoints. Clicking a chat uses the desktop deep link `codex://threads/<id>`.
+The widget reads Codex's local conversation catalog, turn history, and retry logs in SQLite read-only mode. If the history index has not recorded a new running turn, a live execution span plus incremental rollout lifecycle metadata can identify it. This fallback follows task start, completion, and interruption and keeps only IDs, states, timestamps, and file offsets in memory. Subagents and chats that are merely opened are excluded. Plugin hooks record only lifecycle state, IDs, and timestamps. Quota uses Codex's official app-server account endpoints. Clicking a chat uses the desktop deep link `codex://threads/<id>`.
 
 Settings and snapshots stay under `%LOCALAPPDATA%\CodexFloat\`. Snapshots include chat titles, IDs, states, and quota summaries. Message bodies, raw error text, passwords, and access tokens are not saved by this project. There is no project telemetry service. See [PRIVACY.md](PRIVACY.md).
 
