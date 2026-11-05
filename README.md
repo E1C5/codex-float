@@ -61,11 +61,13 @@ Keep `CodexFloat.exe.config` next to the executable and keep the plugin's `ui`, 
 | --- | --- | --- |
 | Working | Rotating gray circle | A task is active. |
 | Question | Blue `? Question` pill | A synchronous input request, approval, or failed request needs attention. Chinese uses `? 问题`. |
-| Reconnecting | Wi-Fi bands appear from bottom to top | Codex is retrying an active turn, including its final numbered attempt. It remains reconnecting regardless of elapsed time until recovery or a terminal result. |
-| Offline | Orange Wi-Fi icon with a slash and a pale orange pill | Codex has ended the turn with a network error. Elapsed retry time alone never marks a chat offline. |
+| Reconnecting | Wi-Fi bands appear from bottom to top | Codex is performing numbered retries, including 2/5 or 5/5. These attempts stay reconnecting regardless of elapsed time. |
+| Offline | Orange Wi-Fi icon with a slash and a pale orange pill | Codex explicitly reports a failed stream connection waiting for network recovery, or ends the turn with a network error. A network wait can happen while the turn is still active. |
 | Completed | Animated green check | The row briefly remains, then fades, slides, and closes its space. |
 
 When collapsed, questions show a blue dot, offline chats an orange dot, and completed chats a green dot. Completion remains available until the panel is expanded. Ordinary work does not create a notification dot.
+
+Elapsed retry time alone never marks a chat offline. New numbered retry messages can return a network wait to Reconnecting, and new task activity restores Working. A request hook alone does not prove that the connection has recovered.
 
 The quota orb prefers the shortest available limit, usually five hours. If Codex supplies only a weekly window, the widget shows that window instead. It never invents a missing limit. The details panel lists limits before reset countdowns; an additional balance is labeled **Credits** (中文: **额度**) and appears only when greater than zero. Balances are shown as supplied, without assuming a currency.
 

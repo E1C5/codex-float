@@ -12,6 +12,6 @@ To build the unmodified source, run `powershell -NoProfile -ExecutionPolicy Bypa
 
 Chat status comes from local read-only Codex history, logs, and lifecycle hooks. Quota comes from the official app-server account endpoints. The widget never starts a model turn or stores login credentials. Private Codex database schemas can change; status detection is best effort. Only quota windows actually supplied by the account are shown.
 
-Connection retries stay **Reconnecting** while the turn is still active, including the final numbered attempt. **Offline** means Codex has ended the turn with a network error; elapsed time alone does not mark a chat offline.
+Numbered connection retries stay **Reconnecting**, including the final attempt. **Offline** means Codex explicitly reports a failed connection waiting for network recovery, or ends the turn with a network error. Network waiting can occur while the turn is still active; elapsed time alone does not mark a chat offline. New task activity clears the network-wait state.
 
 See the [project repository](https://github.com/Liu12345678-Liu/codex-float) for screenshots, installation, limitations, and the download-and-use-only license. This is an independent project, not an official OpenAI product.

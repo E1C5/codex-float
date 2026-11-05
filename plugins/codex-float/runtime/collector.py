@@ -15,6 +15,7 @@ import time
 from rpc import AppServer
 
 NETWORK_ERROR = re.compile(r"network|connect(?:ion)?|disconnected|timed? ?out|timeout|dns|resolve|stream.*(?:closed|error)|网络|重连|连接", re.I)
+NETWORK_WAIT = re.compile(r"stream connection failed;\s*waiting to retry|waiting for network|等待网络", re.I)
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 
 
@@ -134,9 +135,8 @@ class LogFeed:
                 if row["target"] == "codex_core::responses_retry":
                     body = (row["feedback_log_body"] or "")[-1800:]
                     if NETWORK_ERROR.search(body):
-                        previous = self.retries.get(thread)
-                        start = previous[0] if previous and stamp - previous[1] < 120 else stamp
-                        self.retries[thread] = (start, stamp)
+                        state = "offline" if NETWORK_WAIT.search(body) else "reconnecting"
+                        self.retries[thread] = (stamp, state)
             self.cursor = end
 
 
@@ -152,9 +152,12 @@ def classify_status(turn_status, latest_activity, retry=None, hook=None, turn_er
     hook = hook or {}
     if hook.get("state") == "question" and hook.get("at", 0) >= latest_activity:
         return "question", "等待你的处理"
+    # A request hook alone does not prove that a network wait has ended.
+    if retry and retry[0] > latest_activity:
+        if retry[1] == "offline":
+            return "offline", "连接已中断，正在等待网络恢复"
+        return "reconnecting", "正在重新连接"
     if hook.get("state") == "reconnecting" and hook.get("at", 0) > latest_activity:
-        retry = (hook.get("retrySince", hook["at"]), hook["at"])
-    if retry and retry[1] > latest_activity:
         return "reconnecting", "正在重新连接"
     return "working", "正在工作"
 

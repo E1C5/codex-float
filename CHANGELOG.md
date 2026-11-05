@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.2
+
+- Recognize explicit connection-failed/network-wait log messages as Offline,
+  even when Codex keeps the turn in progress while waiting for network recovery.
+- Preserve Reconnecting for numbered retries such as 2/5 and 5/5, with no
+  elapsed-time cutoff.
+- Keep request hooks from replacing a confirmed network wait with Reconnecting;
+  new retry logs or task activity can clear it.
+- Add regression coverage for network waiting, ordinary retries after a wait,
+  recovery, unrelated logs, and private error text staying out of snapshots.
+
 ## 0.2.1
 
 - Keep active connection retries in the Reconnecting state, including attempts
